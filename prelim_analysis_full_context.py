@@ -94,6 +94,41 @@ def replace_word_with_response(x):
         human_text = new_spacy[adjusted_idx].text
     return {'human_text': human_text, 'human_pos': new_spacy[adjusted_idx].pos_, 'human_lemma': new_spacy[adjusted_idx].lemma_}
 
+def get_gpt3_completion_logits(seqs):
+    # get around 600 request/min openai api limit... 
+    if REQUEST_RATE_COUNTER >= 550 and (time.time() - START_TIME) <= 55: 
+        REQUEST_RATE_COUNTER = 0
+        time.sleep(60 - (time.time() - START_TIME) + 5)
+        START_TIME = time.time()
+    if time.time() - START_TIME >= 65:
+        REQUEST_RATE_COUNTER = 0
+        START_TIME = time.time()
+    REQUEST_RATE_COUNTER += 1
+    response = openai.Completion.create(
+            engine="davinci",
+            prompt=text,
+            max_tokens=0,
+            temperature=0.0,
+            logprobs=0,
+            echo=True,
+        )
+
+    logprob = response["choices"][0]["logprobs"]
+    if indices is not None:
+        if logprob['text_offset'][-1] < indices[1]:
+            end_token = len(logprob['text_offset'])
+        else:
+            end_token = logprob['text_offset'].index(indices[1])
+        try:
+            start_token = logprob['text_offset'].index(logprob['text_offset'][1] if indices[0] == 0 else indices[0]-1)
+        except: 
+            start_token = logprob['text_offset'].index(logprob['text_offset'][1] if indices[0] == 0 else indices[0]) # account for no space before word
+        avg_logprob = np.array(logprob["token_logprobs"])[start_token:end_token].mean()
+    else:
+        avg_logprob = np.array(logprob["token_logprobs"])[1:].mean()
+    ppl = np.exp(-avg_logprob)
+
+
 def get_lm_completion_logits(seqs):
     pred_words = []
     entropies = []
