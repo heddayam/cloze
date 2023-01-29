@@ -19,6 +19,7 @@ from provo_torch_dataset import ProvoDataset
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
+import argparse
 
 DATA_DIR = '/data/mourad/provo_data/plots/'
 
@@ -49,7 +50,11 @@ def load_data():
         df_cloze[df_cloze.Text.str.contains("Very similar")].Text.unique()[0], 
         df_cloze[df_cloze.Text.str.contains("Very similar")].Text.unique()[1]
         )
-    return df_eye, df_cloze
+    tokenized_prompts = pd.read_csv('/data/mourad/kenlm/preprocessed/provo_prompts_tokenized.txt', sep='\t', header=None)
+    left_df = pd.read_csv('/data/mourad/provo_data/left_context_for_pred.tsv', sep='\t')
+    tokenized_prompts.columns = ['prompt']
+    tokenized_prompts['Word_Unique_ID'] = left_df.Word_Unique_ID
+    return df_eye, df_cloze, tokenized_prompts
 
 def match_word(x):
     current_index = x.Word_Number-1
@@ -128,6 +133,24 @@ def get_lm_completion_logits(seqs):
         top_50_entropies.append(top_50_probs)
     return pred_words, entropies, top_50_pred_words, top_50_entropies
 
+def get_trigram_spacy(x):
+    target_idx = x.target_i
+    start_idx = 0
+    for sent_i, s in enumerate(x.text_spacy.sents):
+        if target_idx >= s.start and target_idx < s.end:
+            start_idx = s.start
+            sent = s
+            break
+    adjusted_idx = target_idx - start_idx
+    start = sent[:adjusted_idx].text
+    end =  sent[adjusted_idx+1:].text
+    new_text = start + f" {x.trigram_pred} " + end
+    new_text = new_text.strip().capitalize()
+    new_spacy = nlp(new_text)
+    # adjust for scenario where lm doesn't predict a space before completion
+    adjusted_idx -= (len(sent) - len(new_spacy))
+    return {'trigram_text': x.trigram_pred, 'trigram_pos': new_spacy[adjusted_idx].pos_, 'trigram_lemma': new_spacy[adjusted_idx].lemma_, 'trigram_i': adjusted_idx + sent.start}
+
 def get_lm_spacy(x):
     target_idx = x.target_i
     start_idx = 0
@@ -142,7 +165,7 @@ def get_lm_spacy(x):
     new_text = start + f"{x.lm_generated} " + end
     new_text = new_text.strip().capitalize()
     new_spacy = nlp(new_text)
-    # adjust for scenario where LM doesn't predict a space before completion
+    # adjust for scenario where lm doesn't predict a space before completion
     adjusted_idx -= (len(sent) - len(new_spacy))
     return {'lm_text': x.lm_generated, 'lm_pos': new_spacy[adjusted_idx].pos_, 'lm_lemma': new_spacy[adjusted_idx].lemma_, 'lm_i': adjusted_idx + sent.start}
 
@@ -152,7 +175,7 @@ def get_lm_top_spacy(x):
     spacy_lm_token = df.apply(get_lm_spacy, axis=1)
     return pd.DataFrame.from_records(spacy_lm_token.tolist()).to_dict(orient='list')
 
-def process_data(df):
+def process_data(df, tokenized_prompts, trigram_context, debug):
     df['Word'] = df.Word.str.lower()
     #custom fixes
     df['Text'] = df.Text.str.replace('90%', '0.9%')
@@ -161,6 +184,7 @@ def process_data(df):
     df['Response'] = df.Response.str.replace("cant", "can't")
     text_spacy = pd.Series(df.Text.unique()).swifter.apply(nlp)
 
+    print("Processing Human Response data...")
     text_spacy = pd.DataFrame(text_spacy, columns=['text_spacy'])
     text_spacy.index += 1
     df = df.merge(text_spacy, left_on='Text_ID', right_index=True)
@@ -171,10 +195,29 @@ def process_data(df):
     human_token = df.apply(replace_word_with_response, axis=1)
     df = pd.concat([df, pd.DataFrame.from_records(human_token)], axis=1)
     df = df.dropna().reset_index(drop=True)
+
+
+    print("Processing Trigram model...")
+    trigram_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates()
+    trigram_df['prompt'] = trigram_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+    kenlm_df = pd.read_csv('/data/mourad/provo_data/kenlm_preds.tsv', sep='\t')
+    trigram_df = trigram_df.merge(kenlm_df, on='Word_Unique_ID')
+    #df = df.merge(kenlm_df, on='Word_Unique_ID')
+    spacy_trigram_token = trigram_df.swifter.apply(get_trigram_spacy, axis=1)
+    x = pd.DataFrame.from_records(spacy_trigram_token.tolist()).to_dict(orient='list')
+    ngram_df = pd.DataFrame.from_records(x)
+    trigram_df = pd.concat([trigram_df, ngram_df], axis=1)
+    if not debug:
+        trigram_df.to_csv('/data/mourad/provo_data/trigram_df_for_context_analysis.tsv', sep='\t', index=False)
     
+    print("Processing GPT2...")
     # get LM next word prediction
-    lm_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates()
-    lm_df['prompt'] = lm_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+    lm_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates().reset_index(drop=True)
+    #lm_df['prompt'] = lm_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+    lm_df = lm_df.merge(tokenized_prompts, on="Word_Unique_ID", how='inner')
+    #lm_df['prompt'] = tokenized_prompts.prompt
+    if trigram_context: 
+        lm_df['prompt'] = lm_df.prompt.swifter.apply(lambda x: " ".join(x.split()[-2:]))
     generated_words, entropies, top_50_words, top_50_probs = get_lm_completion_logits(lm_df.prompt)
     lm_df['lm_generated'] = generated_words
     lm_df['lm_entropy'] = entropies 
@@ -214,12 +257,22 @@ def load_fix_spacy_tokenizer():
 
 
 if __name__ == '__main__':
-    df_eye, df_cloze = load_data()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true', required=False)
+    parser.add_argument('--trigram', action='store_true')
+    args = parser.parse_args()
+
+    df_eye, df_cloze, tokenized_prompts = load_data()
+    if args.debug:
+        df_cloze = df_cloze.head(100)
+        tokenized_prompts = tokenized_prompts.head(100)
     reuse_preds = False
     if reuse_preds:
         df_spacy = pd.read_csv('/data/mourad/provo_data/spacy_and_gpt2_data.pkl') #, sep='\t')
     else:
         nlp = load_fix_spacy_tokenizer()
-        data_df = process_data(df_cloze)
-        data_df.to_pickle('/data/mourad/provo_data/spacy_and_gpt2_entropy_top_50_data.pkl')
+        data_df = process_data(df_cloze, tokenized_prompts, args.trigram, args.debug)
+        pdb.set_trace()
+        if not args.debug:
+            data_df.to_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if args.trigram else ''}_gpt2_entropy_top_50_data.pkl")
         pdb.set_trace()

@@ -42,6 +42,7 @@ def load_data():
         df_cloze[df_cloze.Text.str.contains("Very similar")].Text.unique()[0], 
         df_cloze[df_cloze.Text.str.contains("Very similar")].Text.unique()[1]
         )
+    #pdb.set_trace()
     return df_eye, df_cloze
 
 def match_word(x):
@@ -110,6 +111,7 @@ def spacy_analysis(df):
     # pdb.set_trace()
     lm_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'spacy_token']].drop_duplicates()
     lm_df['prompt'] = lm_df.swifter.apply(lambda x: x.text_spacy[:x.spacy_token.i].text, axis=1)
+    pdb.set_trace()
     lm_df['lm_generated'] = get_lm_completion(lm_df.prompt)
     lm_df['lm_spacy_token'] = lm_df.lm_generated.swifter.apply(get_lm_spacy)
     # lm_df['lm_response_text'] = lm_df.lm_spacy_token.swifter.apply(lambda x: x.text)
@@ -118,6 +120,13 @@ def spacy_analysis(df):
     return df
     # df['text_spacy'] = df.Text.swifter.apply(nlp)
     # pdb.set_trace()
+
+def trigram_spacy_analysis():
+    left  = pd.read_csv('/data/mourad/provo_data/left_context_for_pred.tsv', sep='\t')
+    df = pd.read_csv('/data/mourad/provo_data/kenlm_preds.tsv', sep='\t')
+    df = df.merge(left[['Word_Unique_ID', 'prompt']], on='Word_Unique_ID')
+    df.text = df.apply(lambda x: f"{x.prompt} {x.kenlm_prob}"
+    pdb.set_trace()
 
 def compare_pos(eye_df, spacy_df):
     spacy_df.to_csv('/data/mourad/provo_data/spacy_and_gpt2_data.tsv', sep='\t', index=False)
@@ -415,11 +424,13 @@ def check_sem_cat(spacy_df):
 
 if __name__ == '__main__':
     df_eye, df_cloze = load_data()
-    reuse_preds = True
+    reuse_preds = False
     if reuse_preds:
         df_spacy = pd.read_csv('/data/mourad/provo_data/spacy_and_gpt2_data.tsv', sep='\t')
     else:
         nlp = spacy.load("en_core_web_sm")
+        trigram_spacy_analysis()
+        pdb.set_trace()
         df_spacy = spacy_analysis(df_cloze)
 
     pdb.set_trace()
