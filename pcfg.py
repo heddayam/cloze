@@ -77,12 +77,14 @@ def estimate_pcfg():
     grammar = induce_pcfg(Nonterminal('S'), prods)
     f = open('/data/mourad/pcfg/induced_pcfg_250k.txt', 'w')
     for prod in grammar.productions():
-        pdb.set_trace()
         mod = prod 
-        f.write(prod)
+        f.write(str(prod)+'\n')
     return grammar
 
 def score_prompts(pcfg):
+    #prods = open('/data/mourad/pcfg/induced_pcfg_250k.txt', 'r').readlines()
+    #pcfg = induce_pcfg(Nonterminal('S'), prods)
+    pdb.set_trace()
     prompts = open('/data/mourad/kenlm/preprocessed/provo_prompts.txt', 'r').readlines()
     preds = pd.read_pickle('/data/mourad/pcfg/target_df.pkl')
     #preds = pd.read_csv('/data/mourad/pcfg/target_df.tsv', sep='\t')
@@ -95,7 +97,9 @@ def score_prompts(pcfg):
             return parse
         prob = parse.prob()
         return prob
-    preds['score'] = preds.prompt.swifter.apply(get_prob)
+    pdb.set_trace()
+    preds = preds.sample(n=100, random_state=42)
+    preds['score'] = preds.prompt.apply(get_prob)
     #preds['score'] = preds.prompt.swifter.apply(lambda x: list(vit.parse(x.split()))[0].prob())
     #preds.text_spacy = preds.text_spacy.astype(str)
     #vit.parse('Hello I am a person')
@@ -108,9 +112,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     #abstract_pcfg()
-    torch.multiprocessing.set_start_method('spawn')
-    parallel_parse(args.start, args.n_cpus, args.step)
+    #torch.multiprocessing.set_start_method('spawn')
+    #parallel_parse(args.start, args.n_cpus, args.step)
     #parse_data()
-    #pcfg = estimate_pcfg()
-    #pdb.set_trace()
-    #score_prompts(pcfg)
+    pcfg = estimate_pcfg()
+    pdb.set_trace()
+    #pcfg=None
+    score_prompts(pcfg)

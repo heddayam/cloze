@@ -1,4 +1,5 @@
 from calendar import c
+import time
 from pickle import FALSE
 import pandas as pd
 # import plotly.express as px
@@ -20,6 +21,8 @@ import torch
 from torch.utils.data import DataLoader
 import numpy as np
 import argparse
+import openai
+import json
 
 DATA_DIR = '/data/mourad/provo_data/plots/'
 
@@ -95,25 +98,52 @@ def replace_word_with_response(x):
     return {'human_text': human_text, 'human_pos': new_spacy[adjusted_idx].pos_, 'human_lemma': new_spacy[adjusted_idx].lemma_}
 
 def get_gpt3_completion_logits(seqs):
-    # get around 600 request/min openai api limit... 
-    if REQUEST_RATE_COUNTER >= 550 and (time.time() - START_TIME) <= 55: 
-        REQUEST_RATE_COUNTER = 0
-        time.sleep(60 - (time.time() - START_TIME) + 5)
-        START_TIME = time.time()
-    if time.time() - START_TIME >= 65:
-        REQUEST_RATE_COUNTER = 0
-        START_TIME = time.time()
-    REQUEST_RATE_COUNTER += 1
-    response = openai.Completion.create(
-            engine="davinci",
-            prompt=text,
-            max_tokens=0,
-            temperature=0.0,
-            logprobs=0,
-            echo=True,
-        )
-
-    logprob = response["choices"][0]["logprobs"]
+    global REQUEST_RATE_COUNTER
+    global START_TIME
+    openai.organization = "org-B28cWZ9XL2EtlOfXYLLflJWA"
+    openai.api_key = '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'
+    #openai.Model.list()
+    cached_resps = open('gpt3_cache.txt', 'r').readlines()
+    cached_resps = [json.loads(resp) for resp in cached_resps]
+    cache_file = open('gpt3_cache.txt', 'a') 
+    pred_words = []
+    entropies = []
+    top_50_entropies = []
+    top_50_pred_words = []
+    for idx, text in tqdm(enumerate(seqs)):
+        if idx < len(cached_resps):
+            response = cached_resps[idx]
+        else:
+            # get around 600 request/min openai api limit... 
+            if REQUEST_RATE_COUNTER >= 550 and (time.time() - START_TIME) <= 55: 
+                REQUEST_RATE_COUNTER = 0
+                time.sleep(60 - (time.time() - START_TIME) + 5)
+                START_TIME = time.time()
+            if time.time() - START_TIME >= 65:
+                REQUEST_RATE_COUNTER = 0
+                START_TIME = time.time()
+            REQUEST_RATE_COUNTER += 1
+            response = openai.Completion.create(
+                    engine="text-davinci-003", #"davinci", 
+                    prompt=text,
+                    max_tokens=3,
+                    temperature=0.0,
+                    logprobs=50,
+                    echo=True,
+                )
+            cache_data = json.dumps(response) + "\n"
+            cache_file.write(cache_data)
+        #pred_word = response["choices"][0]["text"].split()[len(text.split())]
+        pred_word = response["choices"][0]["logprobs"]["tokens"][-3].strip()
+        pred_words.append(pred_word)
+        top_5 = dict(response["choices"][0]["logprobs"]["top_logprobs"][-3])
+        top_5 = dict(sorted(top_5.items(), key=lambda x:x[1], reverse=True))
+        entropies.append(ss.entropy(list(top_5.values())))
+        top_50_pred_words.append(list(top_5.keys()))
+        top_50_entropies.append(list(top_5.values()))
+    cache_file.close()
+    return pred_words, entropies, top_50_pred_words, top_50_entropies
+    '''logprob = response["choices"][0]["logprobs"]
     if indices is not None:
         if logprob['text_offset'][-1] < indices[1]:
             end_token = len(logprob['text_offset'])
@@ -126,7 +156,7 @@ def get_gpt3_completion_logits(seqs):
         avg_logprob = np.array(logprob["token_logprobs"])[start_token:end_token].mean()
     else:
         avg_logprob = np.array(logprob["token_logprobs"])[1:].mean()
-    ppl = np.exp(-avg_logprob)
+    ppl = np.exp(-avg_logprob)'''
 
 
 def get_lm_completion_logits(seqs):
@@ -210,7 +240,7 @@ def get_lm_top_spacy(x):
     spacy_lm_token = df.apply(get_lm_spacy, axis=1)
     return pd.DataFrame.from_records(spacy_lm_token.tolist()).to_dict(orient='list')
 
-def process_data(df, tokenized_prompts, trigram_context, debug):
+def process_data(df, tokenized_prompts, trigram_context, gpt2, gpt3, debug):
     df['Word'] = df.Word.str.lower()
     #custom fixes
     df['Text'] = df.Text.str.replace('90%', '0.9%')
@@ -231,35 +261,53 @@ def process_data(df, tokenized_prompts, trigram_context, debug):
     df = pd.concat([df, pd.DataFrame.from_records(human_token)], axis=1)
     df = df.dropna().reset_index(drop=True)
 
+    if trigram_context:
+        print("Processing Trigram model...")
+        trigram_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates()
+        trigram_df['prompt'] = trigram_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+        kenlm_df = pd.read_csv('/data/mourad/provo_data/kenlm_preds.tsv', sep='\t')
+        trigram_df = trigram_df.merge(kenlm_df, on='Word_Unique_ID')
+        #df = df.merge(kenlm_df, on='Word_Unique_ID')
+        spacy_trigram_token = trigram_df.swifter.apply(get_trigram_spacy, axis=1)
+        x = pd.DataFrame.from_records(spacy_trigram_token.tolist()).to_dict(orient='list')
+        ngram_df = pd.DataFrame.from_records(x)
+        trigram_df = pd.concat([trigram_df, ngram_df], axis=1)
+        if not debug:
+            trigram_df.to_csv('/data/mourad/provo_data/trigram_df_for_context_analysis.tsv', sep='\t', index=False)
+    if gpt2: 
+        print("Processing GPT2...")
+        # get LM next word prediction
+        lm_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates().reset_index(drop=True)
+        #lm_df['prompt'] = lm_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+        lm_df = lm_df.merge(tokenized_prompts, on="Word_Unique_ID", how='inner')
+        #lm_df['prompt'] = tokenized_prompts.prompt
+        if trigram_context: 
+            lm_df['prompt'] = lm_df.prompt.swifter.apply(lambda x: " ".join(x.split()[-2:]))
+        generated_words, entropies, top_50_words, top_50_probs = get_lm_completion_logits(lm_df.prompt)
+        lm_df['lm_generated'] = generated_words
+        lm_df['lm_entropy'] = entropies 
+        lm_df['lm_50_generated'] = top_50_words
+        lm_df['lm_50_probs'] = top_50_probs
+        lm_50_tokens = lm_df.swifter.apply(get_lm_top_spacy, axis=1)
+        lm_df = pd.concat([lm_df.reset_index(drop=True), pd.DataFrame.from_records(lm_50_tokens)], axis=1) 
 
-    print("Processing Trigram model...")
-    trigram_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates()
-    trigram_df['prompt'] = trigram_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
-    kenlm_df = pd.read_csv('/data/mourad/provo_data/kenlm_preds.tsv', sep='\t')
-    trigram_df = trigram_df.merge(kenlm_df, on='Word_Unique_ID')
-    #df = df.merge(kenlm_df, on='Word_Unique_ID')
-    spacy_trigram_token = trigram_df.swifter.apply(get_trigram_spacy, axis=1)
-    x = pd.DataFrame.from_records(spacy_trigram_token.tolist()).to_dict(orient='list')
-    ngram_df = pd.DataFrame.from_records(x)
-    trigram_df = pd.concat([trigram_df, ngram_df], axis=1)
-    if not debug:
-        trigram_df.to_csv('/data/mourad/provo_data/trigram_df_for_context_analysis.tsv', sep='\t', index=False)
-    
-    print("Processing GPT2...")
-    # get LM next word prediction
-    lm_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates().reset_index(drop=True)
-    #lm_df['prompt'] = lm_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
-    lm_df = lm_df.merge(tokenized_prompts, on="Word_Unique_ID", how='inner')
-    #lm_df['prompt'] = tokenized_prompts.prompt
-    if trigram_context: 
-        lm_df['prompt'] = lm_df.prompt.swifter.apply(lambda x: " ".join(x.split()[-2:]))
-    generated_words, entropies, top_50_words, top_50_probs = get_lm_completion_logits(lm_df.prompt)
-    lm_df['lm_generated'] = generated_words
-    lm_df['lm_entropy'] = entropies 
-    lm_df['lm_50_generated'] = top_50_words
-    lm_df['lm_50_probs'] = top_50_probs
-    lm_50_tokens = lm_df.swifter.apply(get_lm_top_spacy, axis=1)
-    lm_df = pd.concat([lm_df.reset_index(drop=True), pd.DataFrame.from_records(lm_50_tokens)], axis=1) 
+    if gpt3:
+        print("Processing GPT3...")
+        gpt3_df = df[['Word_Unique_ID', 'Text', 'text_spacy', 'target_i']].drop_duplicates().reset_index(drop=True)
+        #gpt3_df['prompt'] = gpt3_df.swifter.apply(lambda x: x.text_spacy[:x.target_i].text, axis=1)
+        gpt3_df = gpt3_df.merge(tokenized_prompts, on="Word_Unique_ID", how='inner')
+        #gpt3_df['prompt'] = tokenized_prompts.prompt
+        if trigram_context: 
+            gpt3_df['prompt'] = gpt3_df.prompt.swifter.apply(lambda x: " ".join(x.split()[-2:]))
+        generated_words, entropies, top_50_words, top_50_probs = get_gpt3_completion_logits(gpt3_df.prompt)
+        gpt3_df['lm_generated'] = generated_words
+        gpt3_df['lm_entropy'] = entropies 
+        gpt3_df['lm_50_generated'] = top_50_words
+        gpt3_df['lm_50_probs'] = top_50_probs
+        gpt3_50_tokens = gpt3_df.swifter.apply(get_lm_top_spacy, axis=1)
+        lm_df = pd.concat([gpt3_df.reset_index(drop=True), pd.DataFrame.from_records(gpt3_50_tokens)], axis=1) 
+
+
 
     df = df.drop(['Text_ID', 'Text', 'Word_Number', 'Sentence_Number',
                    'Word_In_Sentence_Number', 'Word', 'Response', 'Response_Count',
@@ -295,19 +343,26 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--debug', action='store_true', required=False)
     parser.add_argument('--trigram', action='store_true')
+    parser.add_argument('--gpt2', action='store_true')
+    parser.add_argument('--gpt3', action='store_true')
     args = parser.parse_args()
 
+    REQUEST_RATE_COUNTER = 0
+    START_TIME = time.time()
     df_eye, df_cloze, tokenized_prompts = load_data()
     if args.debug:
-        df_cloze = df_cloze.head(100)
-        tokenized_prompts = tokenized_prompts.head(100)
+        top_d = 10
+        df_cloze = df_cloze.head(top_d)
+        tokenized_prompts = tokenized_prompts.head(top_d)
     reuse_preds = False
     if reuse_preds:
         df_spacy = pd.read_csv('/data/mourad/provo_data/spacy_and_gpt2_data.pkl') #, sep='\t')
     else:
         nlp = load_fix_spacy_tokenizer()
-        data_df = process_data(df_cloze, tokenized_prompts, args.trigram, args.debug)
-        pdb.set_trace()
+        data_df = process_data(df_cloze, tokenized_prompts, args.trigram, args.gpt2, args.gpt3, args.debug)
         if not args.debug:
-            data_df.to_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if args.trigram else ''}_gpt2_entropy_top_50_data.pkl")
+            if args.gpt2:
+                data_df.to_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if args.trigram else ''}_gpt2_entropy_top_50_data.pkl")
+            elif args.gpt3:
+                data_df.to_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if args.trigram else ''}_gpt3_entropy_top_50_data.pkl")
         pdb.set_trace()

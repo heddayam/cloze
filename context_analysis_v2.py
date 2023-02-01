@@ -50,8 +50,11 @@ sns.set(#font_scale=1.7,
      )
 fontsize = 19
 
-def extract_spacy_tokens(debug, trigram_gpt2):
-    data_df = pd.read_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if trigram_gpt2 else ''}_gpt2_entropy_top_50_data.pkl") #, sep='\t')
+def extract_spacy_tokens(debug, trigram_gpt2, gpt3):
+    if gpt3:
+        data_df = pd.read_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if trigram_gpt2 else ''}_gpt3_entropy_top_50_data.pkl") #, sep='\t')
+    else:
+        data_df = pd.read_pickle(f"/data/mourad/provo_data/spacy_and{'_trigram' if trigram_gpt2 else ''}_gpt2_entropy_top_50_data.pkl") #, sep='\t')
     if debug: data_df = data_df.head(debug)
     target_df = data_df[['Word_Unique_ID', 'text_spacy', 'target_text', 'target_pos', 'target_i']] 
     human_df = data_df[['Word_Unique_ID', 'human_text', 'human_pos', 'human_lemma', 'target_i']]
@@ -215,6 +218,7 @@ def calc_accuracy(acc_metric):
     for resp, df in resp_dfs.items():
         df = calc_matches(df, resp)
         if resp == 'human':
+            pdb.set_trace()
             df = df.loc[df.index.repeat(df.response_count)]
             df = df.drop('response_count', axis=1)
             if acc_metric == 'sample':
@@ -740,6 +744,7 @@ def lin_regr(all_x_df, y_df):
         latex = latex.replace(col, new_col)
     filename = f"linreg_ols_resp_cluster"
     print(filename)
+    pdb.set_trace()
     with open(f'{REG_DATA_DIR}{filename}.tex', 'w') as f:
         f.write(latex)
 
@@ -811,6 +816,7 @@ if __name__ == '__main__':
     parser.add_argument('--match', '-m', choices=['pos', 'exact', 'entropy', 'all'], default='all', help='variable to measure accuracy')
     parser.add_argument('--accuracy_metric', '-am', choices=['majority', 'sample', 'all'])
     parser.add_argument('--trig_gpt2', action='store_true', help='use gpt2 trigram predictions')
+    parser.add_argument('--gpt3', action='store_true', help='use gpt3 preds')
     parser.add_argument('--debug', '-d', type=int, required=False)
     args = parser.parse_args()
     
@@ -820,12 +826,12 @@ if __name__ == '__main__':
     nlp = spacy.load("en_core_web_lg")
 
     df_eye, df_cloze, tokenized_prompts = load_data()
-    target_df, resp_dfs = extract_spacy_tokens(args.debug, args.trig_gpt2)
+    target_df, resp_dfs = extract_spacy_tokens(args.debug, args.trig_gpt2, args.gpt3)
     features = ['preceding_dep', 'preceding_pos', 'position_in_text', 'position_in_sent']
     accuracies = ['pos', 'text', 'synset_match', 'hypernym_match', 'target_sim_match', 'entropy', 'pos_entropy']
     get_features()
     calc_accuracy(args.accuracy_metric)
-    #pdb.set_trace()
+    pdb.set_trace()
     plot_pos_dists(resp_dfs)
     semantic_clusters = semantic_clustering(resp_dfs)
     semantic_clusters_analysis(semantic_clusters)
